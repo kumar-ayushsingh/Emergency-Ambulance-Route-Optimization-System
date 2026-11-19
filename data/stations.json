@@ -1,0 +1,46 @@
+[
+  {
+    "id": "station_majestic",
+    "name": "Majestic Central Ambulance Station",
+    "short_name": "Majestic Station",
+    "lat": 12.9775,
+    "lng": 77.5715,
+    "ambulances_available": 4,
+    "als_ambulances": 2,
+    "bls_ambulances": 2,
+    "address": "Kempegowda Station Road, Majestic, Bengaluru 560009"
+  },
+  {
+    "id": "station_koramangala",
+    "name": "Koramangala Ambulance Hub",
+    "short_name": "Koramangala Hub",
+    "lat": 12.9352,
+    "lng": 77.6245,
+    "ambulances_available": 4,
+    "als_ambulances": 2,
+    "bls_ambulances": 2,
+    "address": "80 Feet Road, Near Sony World Signal, Koramangala 4th Block, Bengaluru 560034"
+  },
+  {
+    "id": "station_indiranagar",
+    "name": "Indiranagar Ambulance Post",
+    "short_name": "Indiranagar Post",
+    "lat": 12.9784,
+    "lng": 77.6408,
+    "ambulances_available": 3,
+    "als_ambulances": 1,
+    "bls_ambulances": 2,
+    "address": "100 Feet Road / CMH Road Intersection, Indiranagar, Bengaluru 560038"
+  },
+  {
+    "id": "station_malleshwaram",
+    "name": "Malleshwaram Ambulance Station",
+    "short_name": "Malleshwaram Station",
+    "lat": 12.9985,
+    "lng": 77.5710,
+    "ambulances_available": 3,
+    "als_ambulances": 1,
+    "bls_ambulances": 2,
+    "address": "8th Cross Road, Margosa Road Junction, Malleshwaram, Bengaluru 560003"
+  }
+]

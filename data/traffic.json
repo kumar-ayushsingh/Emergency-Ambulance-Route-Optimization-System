@@ -1,0 +1,146 @@
+{
+  "description": "Urban traffic congestion multipliers by time period, road classification, and bottleneck corridors for Bengaluru and Srinagar academic evaluation.",
+  "time_periods": {
+    "off_peak": {
+      "name": "Off-Peak",
+      "default_multiplier": 1.0,
+      "hours": "11:00 - 16:30, 20:30 - 23:00",
+      "description": "Free-flowing urban conditions. Baseline speeds apply.",
+      "road_multipliers": {
+        "motorway": 1.0,
+        "motorway_link": 1.0,
+        "trunk": 1.0,
+        "trunk_link": 1.0,
+        "primary": 1.0,
+        "primary_link": 1.0,
+        "secondary": 1.0,
+        "secondary_link": 1.0,
+        "tertiary": 1.0,
+        "tertiary_link": 1.0,
+        "residential": 1.0,
+        "living_street": 1.0,
+        "unclassified": 1.0,
+        "road": 1.0
+      }
+    },
+    "morning_peak": {
+      "name": "Morning Peak",
+      "default_multiplier": 1.6,
+      "hours": "08:30 - 11:00",
+      "description": "Heavy morning commuter congestion, especially on primary arterials.",
+      "road_multipliers": {
+        "motorway": 1.5,
+        "motorway_link": 1.4,
+        "trunk": 1.7,
+        "trunk_link": 1.55,
+        "primary": 1.75,
+        "primary_link": 1.6,
+        "secondary": 1.55,
+        "secondary_link": 1.45,
+        "tertiary": 1.4,
+        "tertiary_link": 1.35,
+        "residential": 1.25,
+        "living_street": 1.2,
+        "unclassified": 1.3,
+        "road": 1.35
+      }
+    },
+    "evening_peak": {
+      "name": "Evening Peak",
+      "default_multiplier": 1.8,
+      "hours": "17:00 - 20:30",
+      "description": "Peak congestion across central business districts and major hospital corridors.",
+      "road_multipliers": {
+        "motorway": 1.7,
+        "motorway_link": 1.55,
+        "trunk": 1.9,
+        "trunk_link": 1.75,
+        "primary": 2.0,
+        "primary_link": 1.8,
+        "secondary": 1.75,
+        "secondary_link": 1.6,
+        "tertiary": 1.5,
+        "tertiary_link": 1.4,
+        "residential": 1.3,
+        "living_street": 1.25,
+        "unclassified": 1.35,
+        "road": 1.4
+      }
+    },
+    "night": {
+      "name": "Night",
+      "default_multiplier": 0.8,
+      "hours": "23:00 - 06:00",
+      "description": "Uncongested late-night streets with low vehicle volume; speeds exceed daytime averages.",
+      "road_multipliers": {
+        "motorway": 0.75,
+        "motorway_link": 0.8,
+        "trunk": 0.8,
+        "trunk_link": 0.85,
+        "primary": 0.8,
+        "primary_link": 0.85,
+        "secondary": 0.85,
+        "secondary_link": 0.9,
+        "tertiary": 0.9,
+        "tertiary_link": 0.9,
+        "residential": 0.95,
+        "living_street": 0.95,
+        "unclassified": 0.9,
+        "road": 0.9
+      }
+    }
+  },
+  "special_corridors": {
+    "karan_nagar_to_smhs": {
+      "id": "karan_nagar_to_smhs",
+      "name": "Karan Nagar to SMHS corridor",
+      "city_specification": "Srinagar",
+      "description": "Arterial health corridor connecting Karan Nagar to SMHS Hospital",
+      "extra_multiplier_peak": 1.5,
+      "keywords": ["karan nagar", "smhs", "kak sarai", "balgarden", "nawab bazar"],
+      "bengaluru_equivalent": "Kalasipalya / Fort Road to Victoria Hospital corridor"
+    },
+    "jehangir_chowk": {
+      "id": "jehangir_chowk",
+      "name": "Jehangir Chowk",
+      "city_specification": "Srinagar",
+      "description": "Central intersection and commercial bottleneck",
+      "extra_multiplier_peak": 1.6,
+      "keywords": ["jehangir chowk", "maulana azad road", "hari singh high street", "amira kadal"],
+      "bengaluru_equivalent": "Dairy Circle / Hosur Road to NIMHANS intersection"
+    },
+    "skims_soura_chowk": {
+      "id": "skims_soura_chowk",
+      "name": "SKIMS Soura chowk",
+      "city_specification": "Srinagar",
+      "description": "Critical access bottleneck to SKIMS tertiary care institute",
+      "extra_multiplier_peak": 1.5,
+      "keywords": ["skims", "soura", "buchpora", "ahmad nagar", "dr ali jan road"],
+      "bengaluru_equivalent": "Sony World / 80 Feet Road Koramangala bottleneck"
+    },
+    "bengaluru_victoria_corridor": {
+      "id": "bengaluru_victoria_corridor",
+      "name": "Fort Road / Kalasipalya to Victoria Hospital corridor",
+      "city_specification": "Bengaluru",
+      "description": "Dense market access corridor leading into Victoria Hospital trauma center",
+      "extra_multiplier_peak": 1.5,
+      "keywords": ["fort road", "kalasipalya", "city market", "kr market", "victoria hospital", "prof. cnr rao circle"]
+    },
+    "bengaluru_hosur_nimhans_corridor": {
+      "id": "bengaluru_hosur_nimhans_corridor",
+      "name": "Hosur Road / Dairy Circle to NIMHANS corridor",
+      "city_specification": "Bengaluru",
+      "description": "High-density arterial bottleneck along Hosur Road leading to NIMHANS Neuro-trauma center",
+      "extra_multiplier_peak": 1.6,
+      "keywords": ["dairy circle", "hosur road", "nimhans", "bannerghatta", "wilson garden"]
+    },
+    "bengaluru_koramangala_stjohns_corridor": {
+      "id": "bengaluru_koramangala_stjohns_corridor",
+      "name": "Sarjapur Road / 80 Feet Road to St. John's corridor",
+      "city_specification": "Bengaluru",
+      "description": "Commercial IT corridor around Koramangala Sony World signal and St. John's Hospital",
+      "extra_multiplier_peak": 1.5,
+      "keywords": ["sarjapur", "koramangala", "sony world", "st. john", "80 feet road", "100 feet road"]
+    }
+  }
+}

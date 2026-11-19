@@ -1,0 +1,29 @@
+# Git & repository metadata
+.git
+.gitignore
+
+# Python caches and virtual environments
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache
+.coverage
+htmlcov
+dist
+build
+*.egg-info
+.env
+venv
+.venv
+ENV
+
+# Node & Frontend dependencies and dev caches
+frontend/node_modules
+frontend/.vite
+frontend/.turbo
+
+# OS specific files
+.DS_Store
+Thumbs.db
+*.log

@@ -1,0 +1,93 @@
+[
+  {
+    "id": "victoria",
+    "name": "Victoria Hospital (BMCRI)",
+    "short_name": "Victoria Hospital",
+    "lat": 12.9634,
+    "lng": 77.5750,
+    "trauma_level": "Level-1",
+    "status": "normal",
+    "beds_available": 34,
+    "total_icu_beds": 60,
+    "address": "Fort Road, Near City Market, Kalasipalya, Bengaluru 560002",
+    "specialties": ["Polytrauma", "Emergency Surgery", "Critical Care", "Burn Care"]
+  },
+  {
+    "id": "nimhans",
+    "name": "National Institute of Mental Health and Neurosciences (NIMHANS)",
+    "short_name": "NIMHANS",
+    "lat": 12.9398,
+    "lng": 77.5960,
+    "trauma_level": "Level-1",
+    "status": "busy",
+    "beds_available": 8,
+    "total_icu_beds": 45,
+    "address": "Hosur Road, Lakkasandra, Near Dairy Circle, Bengaluru 560029",
+    "specialties": ["Neuro-Trauma", "Neurosurgery", "Stroke Care", "Neuro-ICU"]
+  },
+  {
+    "id": "bowring",
+    "name": "Bowring and Lady Curzon Hospital",
+    "short_name": "Bowring Hospital",
+    "lat": 12.9835,
+    "lng": 77.6055,
+    "trauma_level": "Level-2",
+    "status": "normal",
+    "beds_available": 22,
+    "total_icu_beds": 30,
+    "address": "Lady Curzon Road, Tasker Town, Shivajinagar, Bengaluru 560001",
+    "specialties": ["General Surgery", "Orthopedics", "Emergency Care"]
+  },
+  {
+    "id": "st_johns",
+    "name": "St. John's Medical College Hospital",
+    "short_name": "St. John's Hospital",
+    "lat": 12.9298,
+    "lng": 77.6186,
+    "trauma_level": "Level-1",
+    "status": "normal",
+    "beds_available": 18,
+    "total_icu_beds": 50,
+    "address": "Sarjapur Main Road, John Nagar, Koramangala, Bengaluru 560034",
+    "specialties": ["Level-1 Trauma", "Cardiac Emergency", "Surgical ICU", "Toxicology"]
+  },
+  {
+    "id": "manipal",
+    "name": "Manipal Hospital Old Airport Road",
+    "short_name": "Manipal Hospital",
+    "lat": 12.9582,
+    "lng": 77.6485,
+    "trauma_level": "Level-1",
+    "status": "busy",
+    "beds_available": 12,
+    "total_icu_beds": 55,
+    "address": "98 HAL Old Airport Road, Kodihalli, Bengaluru 560017",
+    "specialties": ["Cardiac Emergency", "Interventional Radiology", "Polytrauma", "Comprehensive ICU"]
+  },
+  {
+    "id": "kc_general",
+    "name": "KC General Hospital",
+    "short_name": "KC General Hospital",
+    "lat": 13.0016,
+    "lng": 77.5705,
+    "trauma_level": "Level-2",
+    "status": "normal",
+    "beds_available": 26,
+    "total_icu_beds": 25,
+    "address": "5th Cross Road, Malleshwaram, Bengaluru 560003",
+    "specialties": ["Secondary Trauma", "Emergency Medicine", "Pediatric Care"]
+  },
+  {
+    "id": "igich",
+    "name": "Indira Gandhi Institute of Child Health",
+    "short_name": "IGICH Children's Hospital",
+    "lat": 12.9366,
+    "lng": 77.5947,
+    "trauma_level": "Level-2",
+    "status": "normal",
+    "beds_available": 15,
+    "total_icu_beds": 35,
+    "address": "South Hospital Complex, Dharmaram College Post, Bengaluru 560029",
+    "specialties": ["Pediatric Emergency", "Pediatric Trauma", "Neonatal ICU"]
+  }
+]
