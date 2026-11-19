@@ -44,6 +44,8 @@ def dijkstra_shortest_path(
     source: Any,
     target: Any,
     weight: str = "travel_time",
+    blocked_edges: Optional[Set[Tuple[Any, Any]]] = None,
+    blocked_nodes: Optional[Set[Any]] = None,
 ) -> Optional[DijkstraResult]:
     r"""Compute the single-pair shortest path from source to target using a min-heap.
 
@@ -118,6 +120,13 @@ def dijkstra_shortest_path(
             if v in settled:
                 continue
 
+            if blocked_nodes and v in blocked_nodes:
+                continue
+
+            # Skip blocked edges during simulation without copying the graph
+            if blocked_edges and ((u, v) in blocked_edges or (v, u) in blocked_edges):
+                continue
+
             # Determine minimum edge weight between u and v
             # Handles MultiDiGraph (parallel edges) as well as simple DiGraph/Graph
             edge_data_dict = G.get_edge_data(u, v)
@@ -175,6 +184,7 @@ def multi_source_dijkstra(
     sources: List[Any],
     weight: str = "travel_time",
     cutoff: Optional[float] = None,
+    blocked_edges: Optional[Set[Tuple[Any, Any]]] = None,
 ) -> Tuple[Dict[Any, float], Dict[Any, Any], Dict[Any, Any]]:
     r"""Compute shortest distances and predecessors from multiple sources simultaneously.
 
@@ -222,6 +232,10 @@ def multi_source_dijkstra(
             if v in settled:
                 continue
 
+            # Skip blocked edges during simulation without copying the graph
+            if blocked_edges and ((u, v) in blocked_edges or (v, u) in blocked_edges):
+                continue
+
             edge_data_dict = G.get_edge_data(u, v)
             if edge_data_dict is None:
                 continue
@@ -249,10 +263,11 @@ def multi_source_dijkstra(
 
 
 def find_nearest_station_to_accident(
-    G: nx.MultiDiGraph,
+    G: nx.MultiDiGraph | nx.DiGraph | nx.Graph,
     station_nodes: List[Any],
     accident_node: Any,
     weight: str = "travel_time",
+    blocked_edges: Optional[Set[Tuple[Any, Any]]] = None,
 ) -> Tuple[Optional[Any], Optional[DijkstraResult]]:
     """Identify the optimal ambulance station that can reach the accident in minimum time.
 
@@ -265,6 +280,7 @@ def find_nearest_station_to_accident(
         station_nodes: List of ambulance station node IDs.
         accident_node: Incident junction node ID.
         weight: Edge weight attribute.
+        blocked_edges: Optional set of blocked (u, v) edges to skip.
 
     Returns:
         Tuple of (best_station_node, dijkstra_result_for_best_station).
@@ -274,7 +290,9 @@ def find_nearest_station_to_accident(
     min_time = float("inf")
 
     for s_node in station_nodes:
-        result = dijkstra_shortest_path(G, source=s_node, target=accident_node, weight=weight)
+        result = dijkstra_shortest_path(
+            G, source=s_node, target=accident_node, weight=weight, blocked_edges=blocked_edges
+        )
         if result is not None and result.cost < min_time:
             min_time = result.cost
             best_station = s_node
@@ -284,10 +302,11 @@ def find_nearest_station_to_accident(
 
 
 def find_nearest_hospital_from_accident(
-    G: nx.MultiDiGraph,
+    G: nx.MultiDiGraph | nx.DiGraph | nx.Graph,
     accident_node: Any,
     hospital_nodes: List[Any],
     weight: str = "travel_time",
+    blocked_edges: Optional[Set[Tuple[Any, Any]]] = None,
 ) -> Tuple[Optional[Any], Optional[DijkstraResult]]:
     """Identify the optimal destination hospital from the accident site in minimum time.
 
@@ -298,6 +317,7 @@ def find_nearest_hospital_from_accident(
         accident_node: Incident junction node ID.
         hospital_nodes: List of hospital node IDs.
         weight: Edge weight attribute.
+        blocked_edges: Optional set of blocked (u, v) edges to skip.
 
     Returns:
         Tuple of (best_hospital_node, dijkstra_result_for_best_hospital).
@@ -307,7 +327,9 @@ def find_nearest_hospital_from_accident(
     min_time = float("inf")
 
     for h_node in hospital_nodes:
-        result = dijkstra_shortest_path(G, source=accident_node, target=h_node, weight=weight)
+        result = dijkstra_shortest_path(
+            G, source=accident_node, target=h_node, weight=weight, blocked_edges=blocked_edges
+        )
         if result is not None and result.cost < min_time:
             min_time = result.cost
             best_hospital = h_node

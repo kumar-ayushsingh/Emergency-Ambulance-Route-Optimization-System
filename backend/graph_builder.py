@@ -1,7 +1,7 @@
 r"""Graph Data Layer for Emergency Ambulance Route Optimization System.
 
-Builds, cleans, attributes, and caches the drivable road network of Bengaluru
-using OpenStreetMap (via OSMnx) and NetworkX.
+Builds, cleans, attributes, and caches the drivable road network using NetworkX
+and preprocessed compact graph data.
 
 Mathematical Concepts:
 - Directed Graph G = (V, E): Models one-way streets, turns, and directed road segments.
@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import json
 import logging
+import pickle
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import networkx as nx
-import osmnx as ox
+import numpy as np
+from scipy.spatial import cKDTree
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -30,6 +32,7 @@ logger = logging.getLogger(__name__)
 # Project root paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
+GRAPH_PKL_FILE = DATA_DIR / "graph.pkl"
 DEFAULT_CACHE_FILE = (
     DATA_DIR / "srinagar.graphml"
     if (DATA_DIR / "srinagar.graphml").exists()
@@ -39,15 +42,14 @@ HOSPITALS_FILE = DATA_DIR / "hospitals.json"
 STATIONS_FILE = DATA_DIR / "stations.json"
 
 # In-memory graph singleton to ensure graph is loaded only once
-_LOADED_GRAPH_CACHE: Optional[nx.MultiDiGraph] = None
+_LOADED_GRAPH_CACHE: Optional[nx.DiGraph] = None
+_SPATIAL_TREE: Optional[cKDTree] = None
+_SPATIAL_NODES: Optional[List[int]] = None
 
 # Central/Emergency Corridor Bounding Box for Bengaluru (EPSG:4326)
-# Covers Victoria Hospital, NIMHANS, Bowring, St. John's, Manipal, and KC General
-# In OSMnx 2.x, bbox format is (left/west, bottom/south, right/east, top/north)
 DEFAULT_BBOX: Tuple[float, float, float, float] = (77.560, 12.920, 77.660, 13.010)
 
-# Default urban speeds for Bengaluru road hierarchy (km/h)
-# Conservative estimates reflecting Bengaluru city traffic conditions
+# Default urban speeds for road hierarchy (km/h)
 DEFAULT_SPEEDS_KPH: Dict[str, float] = {
     "motorway": 60.0,
     "motorway_link": 40.0,
@@ -68,139 +70,93 @@ FALLBACK_SPEED_KPH: float = 20.0
 
 
 def parse_speed_kph(raw_speed: Any, highway_type: Any) -> float:
-    """Parse speed limit from OSM maxspeed tag or fallback to road hierarchy default.
+    """Parse raw OpenStreetMap maxspeed tag into float km/h."""
+    if isinstance(raw_speed, (int, float)):
+        return float(raw_speed)
 
-    Args:
-        raw_speed: Raw value of 'maxspeed' tag from OpenStreetMap.
-        highway_type: OSM 'highway' classification (e.g., 'primary', 'residential').
+    if isinstance(raw_speed, list) and raw_speed:
+        return parse_speed_kph(raw_speed[0], highway_type)
 
-    Returns:
-        Speed limit in kilometers per hour (float).
-    """
-    if raw_speed is not None:
+    if isinstance(raw_speed, str):
+        cleaned = "".join(c for c in raw_speed.split()[0] if c.isdigit() or c == ".")
         try:
-            if isinstance(raw_speed, list):
-                raw_speed = raw_speed[0]
-            if isinstance(raw_speed, str):
-                cleaned = raw_speed.lower().replace("km/h", "").replace("kph", "").replace("mph", "").strip()
-                val = float(cleaned)
-                if "mph" in str(raw_speed).lower():
-                    val *= 1.60934
-                if val > 5.0:
-                    return val
-            elif isinstance(raw_speed, (int, float)) and raw_speed > 5.0:
-                return float(raw_speed)
-        except (ValueError, TypeError):
+            val = float(cleaned)
+            if val > 0:
+                return val
+        except ValueError:
             pass
 
-    # Fallback to road class default
-    if isinstance(highway_type, list):
-        highway_type = highway_type[0]
-    return DEFAULT_SPEEDS_KPH.get(str(highway_type), FALLBACK_SPEED_KPH)
+    hw = highway_type[0] if isinstance(highway_type, list) else highway_type
+    if isinstance(hw, str):
+        return DEFAULT_SPEEDS_KPH.get(hw.lower(), FALLBACK_SPEED_KPH)
+
+    return FALLBACK_SPEED_KPH
 
 
-def add_travel_time_weights(G: nx.MultiDiGraph) -> nx.MultiDiGraph:
-    """Calculate and attach travel time in seconds to every edge in the graph.
+def get_spatial_index(G: nx.DiGraph | nx.Graph) -> Tuple[cKDTree, List[int]]:
+    """Build or retrieve fast scipy cKDTree for spatial nearest-node queries without osmnx."""
+    global _SPATIAL_TREE, _SPATIAL_NODES
+    if _SPATIAL_TREE is not None and _SPATIAL_NODES is not None:
+        return _SPATIAL_TREE, _SPATIAL_NODES
 
-    Rule 3: All edge weights are strictly travel time in seconds.
-    Formula: w(e) = length (meters) / speed (meters/second).
+    node_ids = [int(n) for n in G.nodes]
+    coords = np.array(
+        [[float(G.nodes[n]["y"]), float(G.nodes[n]["x"])] for n in node_ids],
+        dtype=np.float64,
+    )
+    _SPATIAL_TREE = cKDTree(coords)
+    _SPATIAL_NODES = node_ids
+    return _SPATIAL_TREE, _SPATIAL_NODES
 
-    Args:
-        G: Directed street multigraph from OSMnx.
 
-    Returns:
-        Graph G with 'speed_kph', 'speed_mps', and 'travel_time' attributes on all edges.
+def find_nearest_node(G: nx.DiGraph | nx.Graph, lat: float, lng: float) -> int:
+    """Find the nearest graph junction to (lat, lng) using cKDTree."""
+    tree, node_ids = get_spatial_index(G)
+    _, idx = tree.query([lat, lng])
+    return node_ids[idx]
+
+
+def nearest_node(G: Any, X: float, Y: float) -> int:
+    """Drop-in replacement for ox.distance.nearest_nodes(G, X=lng, Y=lat)."""
+    return find_nearest_node(G, lat=Y, lng=X)
+
+
+def get_undirected_simple_graph(G_directed: nx.DiGraph | nx.Graph) -> nx.Graph:
+    """Convert directed graph into undirected simple graph for Tarjan bridge/articulation analysis.
+
+    Builds lazily only when requested.
     """
-    for _, _, _, data in G.edges(keys=True, data=True):
-        length_m = float(data.get("length", 1.0))
-        highway = data.get("highway", "unclassified")
-        maxspeed = data.get("maxspeed", None)
+    if not G_directed.is_directed():
+        return G_directed
 
-        speed_kph = parse_speed_kph(maxspeed, highway)
-        speed_mps = speed_kph * (1000.0 / 3600.0)
-
-        # Travel time in seconds (minimum 0.1s to avoid divide-by-zero or zero-weight paths)
-        travel_time = max(0.1, length_m / speed_mps)
-
-        data["speed_kph"] = speed_kph
-        data["speed_mps"] = speed_mps
-        data["travel_time"] = travel_time
-        data["length"] = length_m
-
-    return G
-
-
-def keep_largest_strongly_connected_component(G: nx.MultiDiGraph) -> nx.MultiDiGraph:
-    """Filter graph to its largest Strongly Connected Component (SCC).
-
-    In a strongly connected directed graph, every vertex u has a directed path
-    to every other vertex v (u ~> v and v ~> u). This prevents routing dead-ends.
-
-    Args:
-        G: Input directed street multigraph.
-
-    Returns:
-        Subgraph induced by the largest strongly connected component.
-    """
-    if not nx.is_strongly_connected(G):
-        sccs = list(nx.strongly_connected_components(G))
-        largest_scc = max(sccs, key=len)
-        initial_nodes = len(G.nodes)
-        G = G.subgraph(largest_scc).copy()
-        logger.info(
-            "Filtered to largest Strongly Connected Component: %d -> %d nodes (dropped %d disconnected nodes)",
-            initial_nodes,
-            len(G.nodes),
-            initial_nodes - len(G.nodes),
-        )
-    return G
-
-
-def get_undirected_simple_graph(G_directed: nx.MultiDiGraph) -> nx.Graph:
-    """Convert a directed multigraph into an undirected simple graph.
-
-    Rule 4: Maintain a directed graph for routing and an undirected simple
-    graph for bridge and articulation-point theory.
-
-    For parallel directed edges or opposing lanes between (u, v), the edge with
-    the minimum travel time is preserved as the single undirected edge {u, v}.
-
-    Args:
-        G_directed: Directed MultiDiGraph used for routing.
-
-    Returns:
-        Undirected simple nx.Graph.
-    """
     G_undir = nx.Graph()
 
-    # Copy vertex attributes (coordinates x/lng, y/lat)
+    # Copy vertex coordinates
     for node, attrs in G_directed.nodes(data=True):
-        G_undir.add_node(node, **attrs)
+        G_undir.add_node(node, x=attrs.get("x", 0.0), y=attrs.get("y", 0.0))
 
-    # Collapse parallel / directional edges into minimum-cost simple undirected edges
-    for u, v, _, data in G_directed.edges(keys=True, data=True):
+    # Add edges, preserving minimum travel time between u and v
+    for u, v, data in G_directed.edges(data=True):
         if u == v:
-            # Self-loops cannot be bridges in simple connectivity
             continue
 
         travel_time = float(data.get("travel_time", 1.0))
         length = float(data.get("length", 1.0))
+        name = str(data.get("name", ""))
+        highway = str(data.get("highway", ""))
 
         if G_undir.has_edge(u, v):
-            # If edge already exists, retain the faster connection
             if travel_time < G_undir[u][v]["travel_time"]:
                 G_undir[u][v]["travel_time"] = travel_time
                 G_undir[u][v]["length"] = length
-                G_undir[u][v]["name"] = data.get("name", "")
-                G_undir[u][v]["highway"] = data.get("highway", "")
         else:
             G_undir.add_edge(
                 u,
                 v,
                 travel_time=travel_time,
                 length=length,
-                name=data.get("name", ""),
-                highway=data.get("highway", ""),
+                name=name,
+                highway=highway,
             )
 
     return G_undir
@@ -209,17 +165,7 @@ def get_undirected_simple_graph(G_directed: nx.MultiDiGraph) -> nx.Graph:
 def verify_handshake_lemma(G_undirected: nx.Graph) -> Tuple[int, int, bool]:
     r"""Verify Euler's Handshake Lemma on an undirected graph.
 
-    Mathematical Theorem:
-        \sum_{v \in V} deg(v) = 2 |E|
-
-    Every edge contributes exactly 2 to the sum of vertex degrees because it has
-    two incident endpoints.
-
-    Args:
-        G_undirected: Undirected graph.
-
-    Returns:
-        Tuple of (sum_of_degrees, twice_edges, is_valid).
+    \sum_{v \in V} deg(v) = 2 |E|
     """
     sum_degrees = sum(dict(G_undirected.degree()).values())
     twice_edges = 2 * G_undirected.number_of_edges()
@@ -227,24 +173,13 @@ def verify_handshake_lemma(G_undirected: nx.Graph) -> Tuple[int, int, bool]:
     return sum_degrees, twice_edges, is_valid
 
 
-def print_graph_statistics(G_directed: nx.MultiDiGraph, G_undirected: nx.Graph) -> Dict[str, Any]:
-    """Calculate, log, and return structural graph metrics and degree distribution.
-
-    Args:
-        G_directed: Directed street multigraph.
-        G_undirected: Simple undirected graph.
-
-    Returns:
-        Dictionary of summary statistics.
-    """
+def print_graph_statistics(G_directed: nx.DiGraph, G_undirected: nx.Graph) -> Dict[str, Any]:
+    """Calculate and return structural graph metrics and degree distribution."""
     num_nodes = G_directed.number_of_nodes()
     num_directed_edges = G_directed.number_of_edges()
     num_undirected_edges = G_undirected.number_of_edges()
 
-    # Handshake lemma verification
     sum_deg, twice_e, handshake_passed = verify_handshake_lemma(G_undirected)
-
-    # Degree distribution on undirected simple graph
     degrees = [deg for _, deg in G_undirected.degree()]
     deg_counts = Counter(degrees)
 
@@ -252,7 +187,7 @@ def print_graph_statistics(G_directed: nx.MultiDiGraph, G_undirected: nx.Graph) 
     simple_bends = deg_counts.get(2, 0)
     intersections = sum(count for deg, count in deg_counts.items() if deg >= 3)
 
-    stats = {
+    return {
         "vertices": num_nodes,
         "directed_edges": num_directed_edges,
         "undirected_edges": num_undirected_edges,
@@ -265,78 +200,53 @@ def print_graph_statistics(G_directed: nx.MultiDiGraph, G_undirected: nx.Graph) 
         "degree_histogram": dict(sorted(deg_counts.items())),
     }
 
-    print("\n" + "=" * 65)
-    print("      GRAPH TOPOLOGY & DISCRETE MATHEMATICS SUMMARY")
-    print("=" * 65)
-    print(f"Total Vertices (Junctions |V|):            {num_nodes:,}")
-    print(f"Total Directed Edges (Routing Arcs |E_dir|): {num_directed_edges:,}")
-    print(f"Total Undirected Edges (|E_undir|):         {num_undirected_edges:,}")
-    print("-" * 65)
-    print("HANDSHAKE LEMMA VERIFICATION:")
-    print(f"  Sum of vertex degrees \u03a3 deg(v):          {sum_deg:,}")
-    print(f"  Twice undirected edges 2|E|:             {twice_e:,}")
-    print(f"  Handshake Lemma Satisfied:               {handshake_passed} (\u03a3 deg(v) == 2|E|)")
-    print("-" * 65)
-    print("JUNCTION CLASSIFICATION (Undirected Graph):")
-    print(f"  Degree 1 (Dead Ends / Terminal Nodes):   {dead_ends:,} ({dead_ends / num_nodes * 100:.1f}%)")
-    print(f"  Degree 2 (Through-ways / Road Bends):    {simple_bends:,} ({simple_bends / num_nodes * 100:.1f}%)")
-    print(f"  Degree 3+ (Major Intersections):         {intersections:,} ({intersections / num_nodes * 100:.1f}%)")
-    print("=" * 65 + "\n")
 
-    return stats
-
-
-def build_and_cache_graph(
-    bbox: Tuple[float, float, float, float] = DEFAULT_BBOX,
-    cache_path: Path = DEFAULT_CACHE_FILE,
-) -> nx.MultiDiGraph:
-    """Download drivable road network via OSMnx, clean SCC, weight edges, and cache to GraphML.
-
-    Args:
-        bbox: Bounding box tuple (west, south, east, north) in EPSG:4326.
-        cache_path: Filepath where GraphML cache is written.
-
-    Returns:
-        Prepared directed MultiDiGraph.
-    """
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info("Downloading drivable road network from OpenStreetMap with bbox=%s...", bbox)
-
-    # Download drivable street network
-    G = ox.graph_from_bbox(bbox=bbox, network_type="drive", simplify=True)
-    logger.info("Raw graph acquired: %d nodes, %d edges", len(G.nodes), len(G.edges))
-
-    # Keep largest strongly connected component
-    G = keep_largest_strongly_connected_component(G)
-
-    # Compute and attach travel time in seconds to all edges
-    G = add_travel_time_weights(G)
-
-    # Save to GraphML cache
-    logger.info("Caching graph to %s...", cache_path)
-    ox.save_graphml(G, filepath=cache_path)
-    logger.info("Graph cached successfully.")
-
-    return G
-
-
-def prune_graph_memory(G: nx.MultiDiGraph) -> nx.MultiDiGraph:
-    """Drop unused attributes on nodes and edges to significantly minimize startup and runtime memory.
-
-    Retains strictly required attributes:
-    - Edges: travel_time, length, speed_kph, name, highway, and dynamic travel_time_* weights.
-    - Nodes: x, y coordinates.
-    Drops heavy attributes like Shapely geometries, osmid lists, oneway/reversed flags, and street counts.
-    """
-    kept_edge_keys = {"travel_time", "length", "speed_kph", "name", "highway"}
+def prune_graph_memory(G: nx.DiGraph | nx.MultiDiGraph) -> nx.DiGraph:
+    """Drop all non-essential attributes to minimize memory footprint."""
+    kept_edge_keys = {
+        "travel_time",
+        "length",
+        "speed_kph",
+        "name",
+        "highway",
+        "coords",
+        "travel_time_morning_peak",
+        "travel_time_evening_peak",
+        "travel_time_night",
+    }
     kept_node_keys = {"x", "y"}
 
-    for _, _, _, data in G.edges(keys=True, data=True):
+    if G.is_multigraph():
+        # Collapse into DiGraph
+        G_simple = nx.DiGraph()
+        for node, data in G.nodes(data=True):
+            G_simple.add_node(node, x=float(data["x"]), y=float(data["y"]))
+        for u, v, k, data in G.edges(keys=True, data=True):
+            if u == v:
+                continue
+            tt = float(data.get("travel_time", 1.0))
+            if G_simple.has_edge(u, v):
+                if tt < G_simple[u][v]["travel_time"]:
+                    G_simple[u][v]["travel_time"] = tt
+                    G_simple[u][v]["length"] = float(data.get("length", 1.0))
+            else:
+                G_simple.add_edge(
+                    u,
+                    v,
+                    travel_time=tt,
+                    length=float(data.get("length", 1.0)),
+                    speed_kph=float(data.get("speed_kph", 40.0)),
+                    name=str(data.get("name", "")),
+                    highway=str(data.get("highway", "residential")),
+                )
+        return G_simple
+
+    for u, v, data in G.edges(data=True):
         for key in list(data.keys()):
-            if key not in kept_edge_keys and not key.startswith("travel_time_"):
+            if key not in kept_edge_keys:
                 del data[key]
 
-    for _, data in G.nodes(data=True):
+    for node, data in G.nodes(data=True):
         for key in list(data.keys()):
             if key not in kept_node_keys:
                 del data[key]
@@ -345,111 +255,51 @@ def prune_graph_memory(G: nx.MultiDiGraph) -> nx.MultiDiGraph:
 
 
 def load_graph(
-    cache_path: Path = DEFAULT_CACHE_FILE,
+    cache_path: Path = GRAPH_PKL_FILE,
     bbox: Tuple[float, float, float, float] = DEFAULT_BBOX,
     force_reload: bool = False,
-) -> nx.MultiDiGraph:
-    """Load graph from local GraphML cache if present; otherwise download and cache.
+) -> nx.DiGraph:
+    """Load compact graph from data/graph.pkl if present; otherwise fallback to GraphML.
 
-    Guarantees all edge attributes (travel_time, length, speed_kph) are properly typed floats.
-    Caches graph in memory so it is only loaded once, and prunes unused attributes to minimize memory.
-
-    Args:
-        cache_path: Path to GraphML file.
-        bbox: Bounding box coordinates used if cache is missing or reload is forced.
-        force_reload: If True, bypass cache and re-download.
-
-    Returns:
-        Directed MultiDiGraph ready for routing and analysis.
+    Guarantees fast, low-memory startup (<100MB) without importing osmnx.
     """
     global _LOADED_GRAPH_CACHE
 
     if _LOADED_GRAPH_CACHE is not None and not force_reload:
         return _LOADED_GRAPH_CACHE
 
-    # Check fallback paths if specified cache_path doesn't exist
-    if not cache_path.exists():
-        for candidate in [DATA_DIR / "srinagar.graphml", DATA_DIR / "bengaluru.graphml"]:
-            if candidate.exists():
-                cache_path = candidate
-                break
-
-    if cache_path.exists() and not force_reload:
-        logger.info("Loading graph from cache: %s", cache_path)
-        G = ox.load_graphml(filepath=cache_path)
-
-        # GraphML serialization stores attributes as strings; cast numerical attributes
-        for _, _, _, data in G.edges(keys=True, data=True):
-            if "travel_time" in data:
-                data["travel_time"] = float(data["travel_time"])
-            if "length" in data:
-                data["length"] = float(data["length"])
-            if "speed_kph" in data:
-                data["speed_kph"] = float(data["speed_kph"])
-
-        # Also cast node lat/lng
-        for _, data in G.nodes(data=True):
-            if "y" in data:
-                data["y"] = float(data["y"])
-            if "x" in data:
-                data["x"] = float(data["x"])
-
-        # Prune unused attributes to minimize memory footprint
-        G = prune_graph_memory(G)
+    # Priority 1: Compact pickle file (fastest, lowest memory)
+    if GRAPH_PKL_FILE.exists() and not force_reload:
+        logger.info("Loading compact graph from %s...", GRAPH_PKL_FILE)
+        with open(GRAPH_PKL_FILE, "rb") as f:
+            G = pickle.load(f)
         _LOADED_GRAPH_CACHE = G
         return G
 
-    logger.info("Cache not found at %s. Building fresh graph...", cache_path)
-    G = build_and_cache_graph(bbox=bbox, cache_path=cache_path)
-    G = prune_graph_memory(G)
+    # Priority 2: GraphML fallback
+    target_graphml = cache_path if cache_path.exists() else DEFAULT_CACHE_FILE
+    if target_graphml.exists() and not force_reload:
+        logger.info("Loading graph from GraphML fallback: %s...", target_graphml)
+        import osmnx as ox  # Lazy import only if GraphML fallback needed
+        G_raw = ox.load_graphml(filepath=target_graphml)
+        G = prune_graph_memory(G_raw)
+        _LOADED_GRAPH_CACHE = G
+        return G
+
+    logger.info("No cached graph found. Building compact graph...")
+    from scripts.build_graph import build_compact_graph
+    G = build_compact_graph(DEFAULT_CACHE_FILE, GRAPH_PKL_FILE)
     _LOADED_GRAPH_CACHE = G
     return G
 
 
 def load_hospitals(file_path: Path = HOSPITALS_FILE) -> List[Dict[str, Any]]:
-    """Load hospital metadata from JSON.
-
-    Args:
-        file_path: Path to hospitals.json.
-
-    Returns:
-        List of hospital dictionaries.
-    """
+    """Load hospital metadata from JSON."""
     with open(file_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def load_stations(file_path: Path = STATIONS_FILE) -> List[Dict[str, Any]]:
-    """Load ambulance station metadata from JSON.
-
-    Args:
-        file_path: Path to stations.json.
-
-    Returns:
-        List of ambulance station dictionaries.
-    """
+    """Load ambulance base stations metadata from JSON."""
     with open(file_path, "r", encoding="utf-8") as f:
         return json.load(f)
-
-
-if __name__ == "__main__":
-    # Execute full pipeline: load or build graph, print stats, verify handshake lemma
-    graph = load_graph()
-    undirected_graph = get_undirected_simple_graph(graph)
-    stats = print_graph_statistics(graph, undirected_graph)
-
-    # Verify snapping of all hospitals and stations
-    hospitals = load_hospitals()
-    stations = load_stations()
-
-    print("GEOSPATIAL SNAPPING VERIFICATION:")
-    for h in hospitals:
-        nearest_node = ox.distance.nearest_nodes(graph, X=h["lng"], Y=h["lat"])
-        node_data = graph.nodes[nearest_node]
-        print(f"  [Hospital] {h['name']:<45} -> Graph Node {nearest_node} ({node_data['y']:.4f}, {node_data['x']:.4f})")
-
-    for s in stations:
-        nearest_node = ox.distance.nearest_nodes(graph, X=s["lng"], Y=s["lat"])
-        node_data = graph.nodes[nearest_node]
-        print(f"  [Station]  {s['name']:<45} -> Graph Node {nearest_node} ({node_data['y']:.4f}, {node_data['x']:.4f})")
-    print("=" * 65)

@@ -151,11 +151,18 @@ def attach_traffic_weights_to_graph(
     if config is None:
         config = get_traffic_config()
 
-    for _, _, _, data in G.edges(keys=True, data=True):
-        base_time = float(data.get("travel_time", 1.0))
-        for p in VALID_PERIODS:
-            mult = get_edge_traffic_multiplier(data, period=p, config=config)
-            data[f"travel_time_{p}"] = max(0.1, base_time * mult)
+    if G.is_multigraph():
+        for _, _, _, data in G.edges(keys=True, data=True):
+            base_time = float(data.get("travel_time", 1.0))
+            for p in VALID_PERIODS:
+                mult = get_edge_traffic_multiplier(data, period=p, config=config)
+                data[f"travel_time_{p}"] = max(0.1, base_time * mult)
+    else:
+        for _, _, data in G.edges(data=True):
+            base_time = float(data.get("travel_time", 1.0))
+            for p in VALID_PERIODS:
+                mult = get_edge_traffic_multiplier(data, period=p, config=config)
+                data[f"travel_time_{p}"] = max(0.1, base_time * mult)
 
     return G
 

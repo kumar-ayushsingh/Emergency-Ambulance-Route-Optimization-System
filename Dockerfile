@@ -45,5 +45,5 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 # Expose default listening port
 EXPOSE 8000
 
-# Run uvicorn on dynamic port $PORT (compatible with Cloud Run, Heroku, Railway, Docker)
-CMD ["sh", "-c", "exec uvicorn backend.api:app --host 0.0.0.0 --port $PORT"]
+# Run uvicorn on dynamic port $PORT with a single worker, no reload, no debug
+CMD ["sh", "-c", "exec uvicorn backend.api:app --host 0.0.0.0 --port $PORT --workers 1"]

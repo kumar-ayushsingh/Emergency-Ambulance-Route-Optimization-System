@@ -64,6 +64,7 @@ def yen_k_shortest_paths(
     target: Any,
     K: int = 3,
     weight: str = "travel_time",
+    blocked_edges: Optional[Set[Tuple[Any, Any]]] = None,
 ) -> List[DijkstraResult]:
     r"""Compute the K-shortest simple (loopless) paths from source to target using Yen's algorithm.
 
@@ -73,6 +74,7 @@ def yen_k_shortest_paths(
         target: Target vertex.
         K: Number of paths to retrieve (default: 3 for Plan A, Plan B, Plan C).
         weight: Edge weight attribute (default: 'travel_time').
+        blocked_edges: Optional pre-existing blocked edges to avoid.
 
     Returns:
         List of up to K DijkstraResult objects sorted by non-decreasing travel time.
@@ -81,7 +83,7 @@ def yen_k_shortest_paths(
         return []
 
     # 1. Compute primary shortest path A[0] (Plan A)
-    first_path_res = dijkstra_shortest_path(G, source, target, weight=weight)
+    first_path_res = dijkstra_shortest_path(G, source, target, weight=weight, blocked_edges=blocked_edges)
     if first_path_res is None:
         return []
 
@@ -89,12 +91,10 @@ def yen_k_shortest_paths(
     A: List[DijkstraResult] = [first_path_res]
 
     # Candidate set B: min-heap storing tuples (cost, path_list)
-    # Using a list with heapq to order candidate paths
     B: List[Tuple[float, List[Any]]] = []
     seen_in_B: Set[Tuple[Any, ...]] = {tuple(first_path_res.path)}
 
-    # Working graph to perform temporary removals
-    working_G = G.copy()
+    base_blocked = set(blocked_edges) if blocked_edges else set()
 
     for k in range(1, K):
         prev_path = A[k - 1].path
@@ -104,44 +104,26 @@ def yen_k_shortest_paths(
             spur_node = prev_path[i]
             root_path = prev_path[: i + 1]
 
-            # Track edges and nodes removed in this step to restore later
-            removed_edges: List[Tuple[Any, Any, Any, Dict[str, Any]]] = []
-            removed_nodes: List[Tuple[Any, Dict[str, Any]]] = []
-
-            # 1. Remove edges that are part of previously found paths that share the same root path
+            # 1. Edges to block: edges incident to spur_node shared by previous paths with same root
+            step_blocked_edges = set(base_blocked)
             for path_res in A:
                 p = path_res.path
                 if len(p) > i and p[: i + 1] == root_path:
                     u, v = p[i], p[i + 1]
-                    if working_G.has_edge(u, v):
-                        edge_data = working_G.get_edge_data(u, v)
-                        # Save edge attributes
-                        if working_G.is_multigraph():
-                            for edge_key, attrs in list(edge_data.items()):
-                                removed_edges.append((u, v, edge_key, dict(attrs)))
-                                working_G.remove_edge(u, v, key=edge_key)
-                        else:
-                            removed_edges.append((u, v, None, dict(edge_data)))
-                            working_G.remove_edge(u, v)
+                    step_blocked_edges.add((u, v))
 
-            # 2. Remove all nodes in the root path except the spur node
-            for node in root_path[:-1]:
-                if working_G.has_node(node):
-                    node_attrs = dict(working_G.nodes[node])
-                    # Also save any incident edges to this node
-                    if working_G.is_multigraph():
-                        for nbr in list(working_G.successors(node) if working_G.is_directed() else working_G.neighbors(node)):
-                            for k_edge, attrs in working_G.get_edge_data(node, nbr).items():
-                                removed_edges.append((node, nbr, k_edge, dict(attrs)))
-                        if working_G.is_directed():
-                            for pred_node in list(working_G.predecessors(node)):
-                                for k_edge, attrs in working_G.get_edge_data(pred_node, node).items():
-                                    removed_edges.append((pred_node, node, k_edge, dict(attrs)))
-                    removed_nodes.append((node, node_attrs))
-                    working_G.remove_node(node)
+            # 2. Nodes to block: all nodes in root_path except spur_node
+            step_blocked_nodes = set(root_path[:-1])
 
-            # 3. Compute spur path from spur_node to target
-            spur_res = dijkstra_shortest_path(working_G, source=spur_node, target=target, weight=weight)
+            # 3. Compute spur path from spur_node to target without copying the graph
+            spur_res = dijkstra_shortest_path(
+                G,
+                source=spur_node,
+                target=target,
+                weight=weight,
+                blocked_edges=step_blocked_edges,
+                blocked_nodes=step_blocked_nodes,
+            )
 
             if spur_res is not None:
                 # Concatenate root path and spur path
@@ -150,21 +132,8 @@ def yen_k_shortest_paths(
 
                 if path_tuple not in seen_in_B:
                     seen_in_B.add(path_tuple)
-                    # Compute total cost and distance along this candidate path in original graph G
                     c_cost, c_dist = compute_path_cost_and_distance(G, total_candidate_path, weight=weight)
                     heapq.heappush(B, (c_cost, total_candidate_path))
-
-            # 4. Restore removed nodes
-            for node, attrs in reversed(removed_nodes):
-                working_G.add_node(node, **attrs)
-
-            # 5. Restore removed edges
-            for u, v, k_edge, attrs in reversed(removed_edges):
-                if working_G.has_node(u) and working_G.has_node(v):
-                    if working_G.is_multigraph():
-                        working_G.add_edge(u, v, key=k_edge, **attrs)
-                    else:
-                        working_G.add_edge(u, v, **attrs)
 
         if not B:
             break
@@ -219,19 +188,20 @@ def compute_path_cost_and_distance(
 
 
 def compute_edge_disjoint_backup_paths(
-    G: nx.MultiDiGraph,
+    G: nx.MultiDiGraph | nx.DiGraph | nx.Graph,
     source: Any,
     target: Any,
     primary_path: List[Any],
     max_paths: int = 2,
     weight: str = "travel_time",
+    blocked_edges: Optional[Set[Tuple[Any, Any]]] = None,
 ) -> List[DijkstraResult]:
     r"""Compute backup paths that share strictly zero road segments with the primary route.
 
     Formula:
         E(Backup) \cap E(Primary) = \emptyset
 
-    Temporarily eliminates every edge traversed in the primary path from a working copy of G.
+    Skips every edge traversed in the primary path without copying G.
 
     Args:
         G: Directed road graph.
@@ -240,47 +210,46 @@ def compute_edge_disjoint_backup_paths(
         primary_path: Primary route node sequence [v_0, v_1, ..., v_k].
         max_paths: Maximum number of disjoint alternatives to compute (default: 2).
         weight: Edge weight attribute.
+        blocked_edges: Optional pre-existing blocked edges to avoid.
 
     Returns:
         List of edge-disjoint DijkstraResult objects.
     """
-    working_G = G.copy()
+    disjoint_edges: Set[Tuple[Any, Any]] = set(blocked_edges) if blocked_edges else set()
     disjoint_paths: List[DijkstraResult] = []
 
-    # Remove all directed edges used by the primary path
+    # Block all directed edges used by the primary path (both directions for corridor independence)
     for i in range(len(primary_path) - 1):
         u, v = primary_path[i], primary_path[i + 1]
-        if working_G.has_edge(u, v):
-            working_G.remove_edge(u, v)
-        # Also remove opposing direction to ensure full corridor independence
-        if working_G.has_edge(v, u):
-            working_G.remove_edge(v, u)
+        disjoint_edges.add((u, v))
+        disjoint_edges.add((v, u))
 
     for _ in range(max_paths):
-        res = dijkstra_shortest_path(working_G, source=source, target=target, weight=weight)
+        res = dijkstra_shortest_path(
+            G, source=source, target=target, weight=weight, blocked_edges=disjoint_edges
+        )
         if res is None:
             break
 
         disjoint_paths.append(res)
 
-        # Remove edges of this newly found disjoint path to find subsequent disjoint paths
+        # Block edges of this newly found disjoint path to find subsequent disjoint paths
         for i in range(len(res.path) - 1):
             u, v = res.path[i], res.path[i + 1]
-            if working_G.has_edge(u, v):
-                working_G.remove_edge(u, v)
-            if working_G.has_edge(v, u):
-                working_G.remove_edge(v, u)
+            disjoint_edges.add((u, v))
+            disjoint_edges.add((v, u))
 
     return disjoint_paths
 
 
 def generate_backup_plans(
-    G: nx.MultiDiGraph,
+    G: nx.MultiDiGraph | nx.DiGraph | nx.Graph,
     source: Any,
     target: Any,
     primary_path: Optional[List[Any]] = None,
     primary_time: Optional[float] = None,
     weight: str = "travel_time",
+    blocked_edges: Optional[Set[Tuple[Any, Any]]] = None,
 ) -> List[BackupPlan]:
     """Generate consolidated Plan B and Plan C backup alternatives using Yen's and edge-disjoint search.
 
@@ -296,6 +265,7 @@ def generate_backup_plans(
         primary_path: Optional precomputed primary path.
         primary_time: Optional precomputed primary time.
         weight: Edge weight attribute.
+        blocked_edges: Optional pre-existing blocked edges to avoid.
 
     Returns:
         List of BackupPlan objects (Plan A, Plan B, Plan C).
@@ -303,7 +273,9 @@ def generate_backup_plans(
     plans: List[BackupPlan] = []
 
     # Compute Yen's K=3 shortest paths
-    yen_results = yen_k_shortest_paths(G, source, target, K=3, weight=weight)
+    yen_results = yen_k_shortest_paths(
+        G, source, target, K=3, weight=weight, blocked_edges=blocked_edges
+    )
     if not yen_results:
         return []
 
@@ -325,7 +297,13 @@ def generate_backup_plans(
 
     # Check for completely edge-disjoint alternatives
     disjoint_results = compute_edge_disjoint_backup_paths(
-        G, source=source, target=target, primary_path=plan_a.path, max_paths=2, weight=weight
+        G,
+        source=source,
+        target=target,
+        primary_path=plan_a.path,
+        max_paths=2,
+        weight=weight,
+        blocked_edges=blocked_edges,
     )
 
     # Assign Plan B: Prefer edge-disjoint if available, otherwise Yen's 2nd path

@@ -72,7 +72,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import networkx as nx
 import numpy as np
-import osmnx as ox
+
+from backend.graph_builder import get_spatial_index
 
 logger = logging.getLogger(__name__)
 
@@ -154,11 +155,17 @@ def sample_demand_grid(
     xs = [pt[0] for pt in grid_coords]
     ys = [pt[1] for pt in grid_coords]
 
-    # Snap to nearest graph vertices
-    nearest_nodes = ox.distance.nearest_nodes(G, X=xs, Y=ys)
+    # Snap to nearest graph vertices using fast cKDTree
+    tree, node_ids = get_spatial_index(G)
+    pts = np.column_stack([np.asarray(ys, dtype=np.float64), np.asarray(xs, dtype=np.float64)])
+    _, idxs = tree.query(pts)
+    nearest_nodes = [node_ids[i] for i in idxs]
 
     # Deduplicate while preserving deterministic order and ensure native int types
     demand_nodes = [int(n) for n in dict.fromkeys(nearest_nodes)]
+    # Step 5: Cap the number of demand nodes at 300 to minimize memory
+    if len(demand_nodes) > 300:
+        demand_nodes = demand_nodes[:300]
     logger.info("Sampled %d unique demand vertices from %d grid points.", len(demand_nodes), len(grid_coords))
     return demand_nodes
 
@@ -190,8 +197,11 @@ def get_candidate_junctions(
     xs = [pt[0] for pt in grid_pts]
     ys = [pt[1] for pt in grid_pts]
 
-    # Snap to nearest vertices in graph
-    snapped = ox.distance.nearest_nodes(G, X=xs, Y=ys)
+    # Snap to nearest vertices in graph using cKDTree
+    tree, node_ids = get_spatial_index(G)
+    pts = np.column_stack([np.asarray(ys, dtype=np.float64), np.asarray(xs, dtype=np.float64)])
+    _, idxs = tree.query(pts)
+    snapped = [node_ids[i] for i in idxs]
 
     # Filter to vertices with degree >= 3 or hospital gates
     candidates = list(hospital_nodes)

@@ -11,13 +11,15 @@ Rule 6: Never hard-code API keys.
 
 from __future__ import annotations
 
+import functools
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import networkx as nx
-import osmnx as ox
+import psutil
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -73,6 +75,7 @@ from backend.graph_builder import (
     load_graph,
     load_hospitals,
     load_stations,
+    nearest_node,
     verify_handshake_lemma,
 )
 
@@ -80,93 +83,108 @@ logger = logging.getLogger("uvicorn.error")
 
 # Global state loaded on startup
 app_state: Dict[str, Any] = {
-    "graph": None,  # Original read-only graph
-    "working_graph": None,  # Dynamic working copy for road blockage simulation
-    "undirected_graph": None,
-    "working_undirected_graph": None,
-    "blocked_edges": set(),  # Set of blocked (u, v) pairs
+    "graph": None,  # Original read-only DiGraph with float attributes
+    "undirected_graph": None,  # Lazily built undirected graph for /critical
+    "blocked_edges": set(),  # Set of blocked (u, v) and (v, u) pairs
     "blocked_edges_data": {},
-    "global_bridges": None,
-    "global_aps": None,
+    "global_bridges": None,  # Lazily computed global bridges
+    "global_aps": None,  # Lazily computed articulation points
     "hospitals": [],
     "stations": [],
     "hospital_node_map": {},  # hospital_id -> graph_node
     "station_node_map": {},  # station_id -> graph_node
     "node_hospital_map": {},  # graph_node -> hospital dict
     "node_station_map": {},  # graph_node -> station dict
-    "demand_nodes": None,  # Precomputed representative demand set (300-500 nodes)
-    "candidate_nodes": None,  # Precomputed candidate sites (deg >= 3 + hospital gates)
-    "placement_matrix": None,  # Precomputed (|C|, |D|) distance matrix
     "fleet": [],  # Available physical ambulance units
     "traffic_config": None,  # Traffic multiplier configuration by period and road class
 }
 
 
+def get_undirected_graph() -> nx.Graph:
+    """Lazily construct and cache the undirected graph view only when requested."""
+    if app_state.get("undirected_graph") is None:
+        logger.info("Lazily building undirected graph for topological resilience...")
+        app_state["undirected_graph"] = get_undirected_simple_graph(app_state["graph"])
+    return app_state["undirected_graph"]
+
+
+def get_global_bridges():
+    """Lazily compute global topological bridges and articulation points."""
+    if app_state.get("global_bridges") is None or app_state.get("global_aps") is None:
+        logger.info("Lazily computing global bridges & articulation points via Tarjan's DFS...")
+        G_undir = get_undirected_graph()
+        g_bridges, g_aps = tarjan_bridges_and_articulation_points(G_undir)
+        app_state["global_bridges"] = g_bridges
+        app_state["global_aps"] = g_aps
+        logger.info("Identified %d global bridges and %d articulation points.", len(g_bridges), len(g_aps))
+    return app_state["global_bridges"], app_state["global_aps"]
+
+
+@functools.lru_cache(maxsize=4)
+def get_cached_demand_nodes(num_rows: int = 18, num_cols: int = 18) -> List[int]:
+    """Sample demand nodes on first request and cache up to 4 entries (capped at 300)."""
+    G = app_state["graph"]
+    return [int(n) for n in sample_demand_grid(G, num_rows=num_rows, num_cols=num_cols)][:300]
+
+
+@functools.lru_cache(maxsize=4)
+def get_cached_candidate_nodes() -> List[int]:
+    """Candidate sites for ambulance placement (deg >= 3 + hospital gates)."""
+    G = app_state["graph"]
+    hospital_nodes = [int(n) for n in app_state["hospital_node_map"].values()]
+    return [int(n) for n in get_candidate_junctions(G, hospital_nodes, num_rows=12, num_cols=12)]
+
+
+@functools.lru_cache(maxsize=4)
+def get_cached_placement_matrix():
+    """Lazily load or compute candidate-to-demand placement cost matrix."""
+    G = app_state["graph"]
+    candidates = get_cached_candidate_nodes()
+    demand_nodes = get_cached_demand_nodes()
+    return compute_candidate_demand_matrix(G, candidates, demand_nodes, use_cache=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """FastAPI lifespan event handler to load graph, facilities, and precompute bridges."""
+    """FastAPI lifespan: Lean startup with zero heavy precomputations."""
     logger.info("Initializing Emergency Ambulance Router backend...")
+    t0 = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+
     G = load_graph()
-    G_undir = get_undirected_simple_graph(G)
-    
-    # Attach dynamic time-of-day traffic weights
-    logger.info("Attaching time-of-day traffic multipliers to road network...")
     attach_traffic_weights_to_graph(G)
-    
     app_state["graph"] = G
-    app_state["working_graph"] = G.copy()
-    app_state["undirected_graph"] = G_undir
-    app_state["working_undirected_graph"] = G_undir.copy()
     app_state["blocked_edges"] = set()
     app_state["blocked_edges_data"] = {}
     app_state["traffic_config"] = get_traffic_config()
-
-    # Precompute global topological bridges and articulation points
-    logger.info("Computing global bridges and articulation points via Tarjan's low-link DFS...")
-    g_bridges, g_aps = tarjan_bridges_and_articulation_points(G_undir)
-    app_state["global_bridges"] = g_bridges
-    app_state["global_aps"] = g_aps
-    logger.info("Identified %d global bridges and %d articulation points.", len(g_bridges), len(g_aps))
 
     hospitals = load_hospitals()
     stations = load_stations()
     app_state["hospitals"] = hospitals
     app_state["stations"] = stations
 
-    # Precompute nearest graph nodes for all hospitals
+    # Fast spatial snapping of facilities using cKDTree
     for h in hospitals:
-        node = int(ox.distance.nearest_nodes(G, X=h["lng"], Y=h["lat"]))
+        node = int(nearest_node(G, X=h["lng"], Y=h["lat"]))
         app_state["hospital_node_map"][h["id"]] = node
         app_state["node_hospital_map"][node] = h
 
-    # Precompute nearest graph nodes for all ambulance stations
     for s in stations:
-        node = int(ox.distance.nearest_nodes(G, X=s["lng"], Y=s["lat"]))
+        node = int(nearest_node(G, X=s["lng"], Y=s["lat"]))
         app_state["station_node_map"][s["id"]] = node
         app_state["node_station_map"][node] = s
 
-    # Prompt 5: Initialize demand grid (300-500 nodes) and candidate placement sites
-    logger.info("Initializing demand grid and placement candidate matrix...")
-    demand_nodes = [int(n) for n in sample_demand_grid(G, num_rows=21, num_cols=21)]
-    hospital_nodes = [int(n) for n in app_state["hospital_node_map"].values()]
-    candidate_nodes = [int(n) for n in get_candidate_junctions(G, hospital_nodes, num_rows=12, num_cols=12)]
-    placement_matrix = compute_candidate_demand_matrix(G, candidate_nodes, demand_nodes, use_cache=True)
-    app_state["demand_nodes"] = demand_nodes
-    app_state["candidate_nodes"] = candidate_nodes
-    app_state["placement_matrix"] = placement_matrix
-    logger.info("Demand grid (%d nodes) & candidate sites (%d) initialized.", len(demand_nodes), len(candidate_nodes))
-
-    # Prompt 6: Build individual physical ambulance units across base stations
     fleet = build_ambulance_fleet(stations, app_state["station_node_map"])
     app_state["fleet"] = fleet
-    logger.info("Ambulance fleet (%d units) initialized for multi-incident assignment.", len(fleet))
 
+    t_end = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
     logger.info(
-        "Startup complete: Graph (%d nodes, %d edges), %d hospitals, %d stations loaded.",
+        "Startup complete: Graph (%d nodes, %d edges), %d hospitals, %d stations. Memory: %.2f MB RSS (added %.2f MB).",
         len(G.nodes),
         len(G.edges),
         len(hospitals),
         len(stations),
+        t_end,
+        t_end - t0,
     )
     yield
     logger.info("Shutting down Emergency Ambulance Router backend.")
@@ -366,6 +384,7 @@ def health_check():
     """Service health and diagnostic status."""
     G = app_state.get("graph")
     is_ready = G is not None
+    mem_mb = round(psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024), 2)
     return {
         "status": "operational" if is_ready else "initializing",
         "system": "Emergency Ambulance Route Optimization System",
@@ -374,17 +393,18 @@ def health_check():
         "graph_loaded": is_ready,
         "vertices": len(G.nodes) if is_ready else 0,
         "directed_edges": len(G.edges) if is_ready else 0,
+        "process_memory_mb": mem_mb,
     }
 
 
 @api_router.get("/graph/info")
 def get_graph_info():
     """Return structural topology metrics, Handshake Lemma verification, and degree histogram."""
-    G = app_state["graph"]
-    G_undir = app_state["undirected_graph"]
-
-    if G is None or G_undir is None:
+    G = app_state.get("graph")
+    if G is None:
         raise HTTPException(status_code=503, detail="Graph engine is initializing")
+
+    G_undir = get_undirected_graph()
 
     sum_deg, twice_e, handshake_verified = verify_handshake_lemma(G_undir)
     degrees = [d for _, d in G_undir.degree()]
@@ -483,16 +503,15 @@ def execute_route_calculation(
         use_working_graph: If True, uses dynamic working copy with road blockages.
         time_of_day: Time-of-day traffic period ('off_peak', 'morning_peak', 'evening_peak', 'night').
     """
-    G: nx.MultiDiGraph = (
-        app_state["working_graph"] if use_working_graph else app_state["graph"]
-    )
+    G = app_state["graph"]
     if G is None:
         raise HTTPException(status_code=503, detail="Graph engine is not loaded")
 
+    blocked_edges = app_state.get("blocked_edges") if use_working_graph else None
     weight_attr = get_weight_attribute_for_period(time_of_day)
 
     # 1. Snap accident to nearest graph vertex
-    accident_node = ox.distance.nearest_nodes(G, X=lng, Y=lat)
+    accident_node = int(nearest_node(G, X=lng, Y=lat))
     acc_node_data = G.nodes[accident_node]
     snapped_lat = float(acc_node_data["y"])
     snapped_lng = float(acc_node_data["x"])
@@ -500,7 +519,7 @@ def execute_route_calculation(
     # 2. Find nearest ambulance station (Station -> Accident)
     station_nodes = list(app_state["station_node_map"].values())
     best_station_node, dispatch_result = find_nearest_station_to_accident(
-        G, station_nodes=station_nodes, accident_node=accident_node, weight=weight_attr
+        G, station_nodes=station_nodes, accident_node=accident_node, weight=weight_attr, blocked_edges=blocked_edges
     )
 
     if best_station_node is None or dispatch_result is None:
@@ -515,7 +534,7 @@ def execute_route_calculation(
     if hospital_id and hospital_id in app_state["hospital_node_map"]:
         target_hospital_node = app_state["hospital_node_map"][hospital_id]
         transport_result = dijkstra_shortest_path(
-            G, source=accident_node, target=target_hospital_node, weight=weight_attr
+            G, source=accident_node, target=target_hospital_node, weight=weight_attr, blocked_edges=blocked_edges
         )
         if transport_result is None:
             raise HTTPException(
@@ -526,7 +545,7 @@ def execute_route_calculation(
     else:
         hospital_nodes = list(app_state["hospital_node_map"].values())
         best_hospital_node, transport_result = find_nearest_hospital_from_accident(
-            G, accident_node=accident_node, hospital_nodes=hospital_nodes, weight=weight_attr
+            G, accident_node=accident_node, hospital_nodes=hospital_nodes, weight=weight_attr, blocked_edges=blocked_edges
         )
 
     if best_hospital_node is None or transport_result is None:
@@ -750,11 +769,12 @@ def compute_critical(payload: CriticalRequest):
     - Menger edge-connectivity (lambda) via max-flow
     - Resilience Score R = 100 * (0.4L + 0.4D + 0.2C)
     """
-    G: nx.MultiDiGraph = app_state["graph"]
-    G_undir: nx.Graph = app_state["undirected_graph"]
-
-    if G is None or G_undir is None:
+    G = app_state["graph"]
+    if G is None:
         raise HTTPException(status_code=503, detail="Graph engine is not loaded")
+
+    G_undir = get_undirected_graph()
+    g_bridges, g_aps = get_global_bridges()
 
     if len(payload.route_nodes) < 2:
         raise HTTPException(status_code=400, detail="Route must contain at least 2 nodes")
@@ -767,8 +787,9 @@ def compute_critical(payload: CriticalRequest):
         base_travel_time=payload.base_time_sec,
         source=payload.source,
         target=payload.target,
-        global_bridges=app_state.get("global_bridges"),
-        global_aps=app_state.get("global_aps"),
+        global_bridges=g_bridges,
+        global_aps=g_aps,
+        blocked_edges=app_state.get("blocked_edges"),
     )
 
     features = []
@@ -891,7 +912,7 @@ def compute_backup_routes(payload: BackupRequest):
 
     Rule 5: Return GeoJSON from every API.
     """
-    G: nx.MultiDiGraph = app_state.get("working_graph") or app_state.get("graph")
+    G = app_state["graph"]
     if G is None:
         raise HTTPException(status_code=503, detail="Graph engine is not loaded")
 
@@ -907,6 +928,7 @@ def compute_backup_routes(payload: BackupRequest):
         primary_path=payload.primary_path,
         primary_time=payload.base_time_sec,
         weight="travel_time",
+        blocked_edges=app_state.get("blocked_edges"),
     )
 
     if not plans:
@@ -966,63 +988,39 @@ def compute_backup_routes(payload: BackupRequest):
 
 @api_router.post("/block")
 def block_road_segment(payload: BlockRequest):
-    """Close/block a road segment (u, v) in the working graph, recompute route & resilience.
+    """Close/block a road segment (u, v) in the graph, recompute route & resilience.
 
     Dynamic Graph Theory Simulation:
-    - Removes directed edge e=(u, v) and symmetric e=(v, u) from dynamic MultiDiGraph G_working.
-    - Removes e=(u, v) from undirected simple graph G_undir_working.
-    - Triggers real-time Dijkstra shortest path re-routing.
+    - Adds directed edge e=(u, v) and symmetric e=(v, u) to blocked_edges set (zero graph copies).
+    - Triggers real-time Dijkstra shortest path re-routing skipping blocked edges.
     - Computes added detour penalty ΔT = T_new - T_old.
     - Re-evaluates topological resilience score R_new.
 
     Rule 5: Return GeoJSON from every API.
     """
-    G_orig: nx.MultiDiGraph = app_state["graph"]
-    working_G: nx.MultiDiGraph = app_state["working_graph"]
-    working_undir_G: nx.Graph = app_state["working_undirected_graph"]
-
-    if G_orig is None or working_G is None or working_undir_G is None:
+    G: nx.DiGraph = app_state["graph"]
+    if G is None:
         raise HTTPException(status_code=503, detail="Graph engine is not loaded")
 
     u, v = payload.u, payload.v
     edge_key_tuple = (min(u, v), max(u, v))
 
-    if not (G_orig.has_edge(u, v) or G_orig.has_edge(v, u)):
+    if not (G.has_edge(u, v) or G.has_edge(v, u)):
         raise HTTPException(status_code=404, detail=f"Edge ({u}, {v}) does not exist in road network")
 
-    removed_directed_edges = []
     road_name = "Closed Road Segment"
-
-    if working_G.has_edge(u, v):
-        edge_data = working_G.get_edge_data(u, v)
-        for k, data in list(edge_data.items()):
-            removed_directed_edges.append((u, v, k, dict(data)))
-            if "name" in data and data["name"]:
-                n = data["name"]
-                road_name = n[0] if isinstance(n, list) else n
-            working_G.remove_edge(u, v, key=k)
-
-    if working_G.has_edge(v, u):
-        edge_data = working_G.get_edge_data(v, u)
-        for k, data in list(edge_data.items()):
-            removed_directed_edges.append((v, u, k, dict(data)))
-            if "name" in data and data["name"] and road_name == "Closed Road Segment":
-                n = data["name"]
-                road_name = n[0] if isinstance(n, list) else n
-            working_G.remove_edge(v, u, key=k)
-
-    removed_undir_data = None
-    if working_undir_G.has_edge(u, v):
-        removed_undir_data = dict(working_undir_G.get_edge_data(u, v))
-        working_undir_G.remove_edge(u, v)
+    e_data = G.get_edge_data(u, v) or G.get_edge_data(v, u) or {}
+    if "name" in e_data and e_data["name"]:
+        n = e_data["name"]
+        road_name = n[0] if isinstance(n, list) else n
 
     app_state["blocked_edges"].add(edge_key_tuple)
+    app_state["blocked_edges"].add((u, v))
+    app_state["blocked_edges"].add((v, u))
     app_state["blocked_edges_data"][edge_key_tuple] = {
         "u": u,
         "v": v,
         "name": road_name,
-        "directed_edges": removed_directed_edges,
-        "undirected_data": removed_undir_data,
     }
 
     re_route_result = None
@@ -1041,13 +1039,18 @@ def block_road_segment(payload: BlockRequest):
                 added_delay_min = round(added_delay_sec / 60.0, 2)
 
             turn_order = re_route_result["properties"]["turn_order_vertices"]
+            G_undir = get_undirected_graph()
+            g_bridges, g_aps = get_global_bridges()
             res_result = analyze_route_resilience(
-                G_directed=working_G,
-                G_undirected=working_undir_G,
+                G_directed=G,
+                G_undirected=G_undir,
                 route_nodes=turn_order,
                 base_travel_time=new_total_time,
                 source=turn_order[0],
                 target=turn_order[-1],
+                global_bridges=g_bridges,
+                global_aps=g_aps,
+                blocked_edges=app_state["blocked_edges"],
             )
             resilience_info = {
                 "resilience_score": res_result.resilience_score,
@@ -1064,7 +1067,7 @@ def block_road_segment(payload: BlockRequest):
         except HTTPException:
             re_route_result = None
 
-    blocked_features = get_blocked_edges_features(G_orig)
+    blocked_features = get_blocked_edges_features(G)
     features = []
     if re_route_result:
         features.extend(re_route_result["features"])
@@ -1075,7 +1078,7 @@ def block_road_segment(payload: BlockRequest):
         "properties": {
             "re_routed": re_route_result is not None,
             "blocked_edge": {"u": u, "v": v, "name": road_name},
-            "blocked_edges_count": len(app_state["blocked_edges"]),
+            "blocked_edges_count": len(app_state["blocked_edges_data"]),
             "added_delay_sec": round(added_delay_sec, 1),
             "added_delay_min": added_delay_min,
             "resilience": resilience_info,
@@ -1085,34 +1088,20 @@ def block_road_segment(payload: BlockRequest):
     }
 
 
-
-
-
-
 @api_router.post("/unblock")
 def unblock_road_segment(payload: UnblockRequest):
-    """Restore a previously blocked road segment (u, v) into the working graph.
+    """Restore a previously blocked road segment (u, v) in the working graph.
 
     Rule 5: Return GeoJSON from every API.
     """
-    G_orig: nx.MultiDiGraph = app_state["graph"]
-    working_G: nx.MultiDiGraph = app_state["working_graph"]
-    working_undir_G: nx.Graph = app_state["working_undirected_graph"]
-
+    G: nx.DiGraph = app_state["graph"]
     u, v = payload.u, payload.v
     edge_key_tuple = (min(u, v), max(u, v))
 
-    if edge_key_tuple in app_state["blocked_edges_data"]:
-        b_info = app_state["blocked_edges_data"].pop(edge_key_tuple)
-        app_state["blocked_edges"].discard(edge_key_tuple)
-
-        for u_dir, v_dir, k, data in b_info.get("directed_edges", []):
-            if not working_G.has_edge(u_dir, v_dir, key=k):
-                working_G.add_edge(u_dir, v_dir, key=k, **data)
-
-        undir_data = b_info.get("undirected_data")
-        if undir_data and not working_undir_G.has_edge(u, v):
-            working_undir_G.add_edge(u, v, **undir_data)
+    app_state["blocked_edges_data"].pop(edge_key_tuple, None)
+    app_state["blocked_edges"].discard(edge_key_tuple)
+    app_state["blocked_edges"].discard((u, v))
+    app_state["blocked_edges"].discard((v, u))
 
     re_route_result = None
     resilience_info = None
@@ -1122,13 +1111,18 @@ def unblock_road_segment(payload: UnblockRequest):
                 payload.incident_lat, payload.incident_lng, use_working_graph=True
             )
             turn_order = re_route_result["properties"]["turn_order_vertices"]
+            G_undir = get_undirected_graph()
+            g_bridges, g_aps = get_global_bridges()
             res_result = analyze_route_resilience(
-                G_directed=working_G,
-                G_undirected=working_undir_G,
+                G_directed=G,
+                G_undirected=G_undir,
                 route_nodes=turn_order,
                 base_travel_time=re_route_result["properties"]["total_time_sec"],
                 source=turn_order[0],
                 target=turn_order[-1],
+                global_bridges=g_bridges,
+                global_aps=g_aps,
+                blocked_edges=app_state["blocked_edges"],
             )
             resilience_info = {
                 "resilience_score": res_result.resilience_score,
@@ -1145,7 +1139,7 @@ def unblock_road_segment(payload: UnblockRequest):
         except HTTPException:
             re_route_result = None
 
-    blocked_features = get_blocked_edges_features(G_orig)
+    blocked_features = get_blocked_edges_features(G)
     features = []
     if re_route_result:
         features.extend(re_route_result["features"])
@@ -1155,16 +1149,12 @@ def unblock_road_segment(payload: UnblockRequest):
         "type": "FeatureCollection",
         "properties": {
             "unblocked_edge": {"u": u, "v": v},
-            "blocked_edges_count": len(app_state["blocked_edges"]),
+            "blocked_edges_count": len(app_state["blocked_edges_data"]),
             "resilience": resilience_info,
             "route_properties": re_route_result["properties"] if re_route_result else None,
         },
         "features": features,
     }
-
-
-
-
 
 
 @api_router.post("/restore")
@@ -1173,14 +1163,10 @@ def restore_all_roads(payload: RestoreRequest):
 
     Rule 5: Return GeoJSON from every API.
     """
-    G_orig: nx.MultiDiGraph = app_state["graph"]
-    G_undir: nx.Graph = app_state["undirected_graph"]
-
-    if G_orig is None or G_undir is None:
+    G: nx.DiGraph = app_state["graph"]
+    if G is None:
         raise HTTPException(status_code=503, detail="Graph engine is not loaded")
 
-    app_state["working_graph"] = G_orig.copy()
-    app_state["working_undirected_graph"] = G_undir.copy()
     app_state["blocked_edges"].clear()
     app_state["blocked_edges_data"].clear()
 
@@ -1191,13 +1177,18 @@ def restore_all_roads(payload: RestoreRequest):
             payload.incident_lat, payload.incident_lng, use_working_graph=True
         )
         turn_order = re_route_result["properties"]["turn_order_vertices"]
+        G_undir = get_undirected_graph()
+        g_bridges, g_aps = get_global_bridges()
         res_result = analyze_route_resilience(
-            G_directed=app_state["working_graph"],
-            G_undirected=app_state["working_undirected_graph"],
+            G_directed=G,
+            G_undirected=G_undir,
             route_nodes=turn_order,
             base_travel_time=re_route_result["properties"]["total_time_sec"],
             source=turn_order[0],
             target=turn_order[-1],
+            global_bridges=g_bridges,
+            global_aps=g_aps,
+            blocked_edges=app_state["blocked_edges"],
         )
         resilience_info = {
             "resilience_score": res_result.resilience_score,
@@ -1275,13 +1266,13 @@ def get_coverage(
 
     Rule 5: Return GeoJSON from every API.
     """
-    G: nx.MultiDiGraph = app_state["graph"]
-    demand_nodes = app_state["demand_nodes"]
-    candidate_nodes = app_state["candidate_nodes"]
-    placement_matrix = app_state["placement_matrix"]
-
-    if G is None or demand_nodes is None:
+    G = app_state["graph"]
+    if G is None:
         raise HTTPException(status_code=503, detail="Graph engine or demand grid is not loaded")
+
+    demand_nodes = get_cached_demand_nodes()
+    candidate_nodes = get_cached_candidate_nodes()
+    placement_matrix = get_cached_placement_matrix() if mode != "current" else None
 
     # Mode 1: Current baseline deployment
     if mode == "current":
@@ -1473,7 +1464,7 @@ def assign_ambulances(payload: AssignmentRequest):
     # Snap accidents to graph vertices
     accident_sites: List[AccidentSite] = []
     for idx, acc in enumerate(payload.accidents):
-        snapped = int(ox.distance.nearest_nodes(G, X=acc.lng, Y=acc.lat))
+        snapped = int(nearest_node(G, X=acc.lng, Y=acc.lat))
         acc_id = acc.id or f"accident_{idx + 1}"
         accident_sites.append(
             AccidentSite(
@@ -1630,12 +1621,12 @@ def score_hospitals_endpoint(payload: HospitalScoreRequest):
     and active time-of-day traffic conditions.
     Returns GeoJSON FeatureCollection with routes, hospital markers, and ranked table.
     """
-    G: nx.MultiDiGraph = app_state["working_graph"] if app_state["working_graph"] is not None else app_state["graph"]
+    G = app_state["graph"]
     if G is None:
         raise HTTPException(status_code=503, detail="Graph engine is not loaded")
 
     # 1. Snap accident location to nearest graph junction
-    accident_node = int(ox.distance.nearest_nodes(G, X=payload.lng, Y=payload.lat))
+    accident_node = int(nearest_node(G, X=payload.lng, Y=payload.lat))
     acc_node_data = G.nodes[accident_node]
     snapped_lat = float(acc_node_data["y"])
     snapped_lng = float(acc_node_data["x"])
@@ -1850,14 +1841,14 @@ def compare_traffic_route_endpoint(payload: TrafficCompareRequest):
         source_node = int(payload.source)
         target_node = int(payload.target)
     elif payload.lat is not None and payload.lng is not None:
-        source_node = int(ox.distance.nearest_nodes(G, X=payload.lng, Y=payload.lat))
+        source_node = int(nearest_node(G, X=payload.lng, Y=payload.lat))
         if payload.hospital_id and payload.hospital_id in app_state["hospital_node_map"]:
             target_node = int(app_state["hospital_node_map"][payload.hospital_id])
         else:
             target_node = int(app_state["hospital_node_map"].get("victoria", list(app_state["hospital_node_map"].values())[0]))
     else:
         # Default canonical demonstration incident (Richmond Town to Victoria Hospital)
-        source_node = int(ox.distance.nearest_nodes(G, X=77.6050, Y=12.9450))
+        source_node = int(nearest_node(G, X=77.6050, Y=12.9450))
         target_node = int(app_state["hospital_node_map"]["victoria"])
 
     comparison = compare_offpeak_vs_peak_route(G, source=source_node, target=target_node)
@@ -1946,7 +1937,7 @@ def algorithm_race_endpoint(payload: RaceRequest):
     Returns nodes expanded, heap pushes, runtime, explored node order, and cost equality check.
     Rule 5: Return GeoJSON from every API.
     """
-    G: nx.MultiDiGraph = app_state["working_graph"] if app_state["working_graph"] is not None else app_state["graph"]
+    G = app_state["graph"]
     if G is None:
         raise HTTPException(status_code=503, detail="Graph engine is not loaded")
 
@@ -1960,8 +1951,8 @@ def algorithm_race_endpoint(payload: RaceRequest):
         and payload.destination_lat is not None
         and payload.destination_lng is not None
     ):
-        source_node = int(ox.distance.nearest_nodes(G, X=payload.origin_lng, Y=payload.origin_lat))
-        target_node = int(ox.distance.nearest_nodes(G, X=payload.destination_lng, Y=payload.destination_lat))
+        source_node = int(nearest_node(G, X=payload.origin_lng, Y=payload.origin_lat))
+        target_node = int(nearest_node(G, X=payload.destination_lng, Y=payload.destination_lat))
     else:
         # Default canonical demonstration pair: Majestic Station to Manipal Hospital
         source_node = int(

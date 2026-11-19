@@ -199,15 +199,16 @@ def find_strict_critical_on_route(
 
 
 def find_soft_bridges_on_route(
-    G_directed: nx.MultiDiGraph,
+    G_directed: nx.MultiDiGraph | nx.DiGraph | nx.Graph,
     route_nodes: List[Any],
     base_travel_time: float,
     detour_threshold: float = 1.5,
+    blocked_edges: Optional[Set[Tuple[Any, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], float]:
     r"""Detect soft bridges along the route by simulating single-edge failures.
 
     For every consecutive edge e = (u, v) on the route:
-    1. Temporarily remove edge e from G_directed.
+    1. Temporarily skip edge e in Dijkstra search via blocked_edges (zero graph mutation).
     2. Recompute the shortest path from source (v_0) to target (v_k) via Dijkstra.
     3. Calculate detour ratio:
            \rho(e) = T'(e) / T
@@ -218,6 +219,7 @@ def find_soft_bridges_on_route(
         route_nodes: Ordered sequence of vertices [v_0, v_1, ..., v_k].
         base_travel_time: Baseline optimal travel time in seconds.
         detour_threshold: Threshold ratio to flag as soft bridge (default: 1.5).
+        blocked_edges: Pre-existing blocked edges to respect during simulation.
 
     Returns:
         Tuple of (soft_bridges_list, worst_detour_ratio_rho_max).
@@ -229,31 +231,29 @@ def find_soft_bridges_on_route(
     target = route_nodes[-1]
     soft_bridges: List[Dict[str, Any]] = []
     rho_max = 1.0
+    base_blocked = set(blocked_edges) if blocked_edges else set()
 
     # Iterate through each directed step on the route
     for i in range(len(route_nodes) - 1):
         u = route_nodes[i]
         v = route_nodes[i + 1]
 
-        # Extract edge data to restore after test
-        edge_dict = G_directed.get_edge_data(u, v)
-        if not edge_dict:
+        edge_data = G_directed.get_edge_data(u, v)
+        if not edge_data:
             continue
 
-        # Create a deep copy of edge attributes to restore accurately
-        saved_edges = {k: dict(attrs) for k, attrs in edge_dict.items()}
+        if G_directed.is_multigraph():
+            first_attrs = next(iter(edge_data.values())) if edge_data else {}
+        else:
+            first_attrs = edge_data
 
-        # Temporarily remove directed edge(s) from u to v
-        G_directed.remove_edge(u, v)
+        # Simulate edge failure by adding (u, v) to blocked edges (no graph copy/mutation)
+        step_blocked = set(base_blocked)
+        step_blocked.add((u, v))
 
-        # Recompute shortest path with edge removed
         reroute_result = dijkstra_shortest_path(
-            G_directed, source=source, target=target, weight="travel_time"
+            G_directed, source=source, target=target, weight="travel_time", blocked_edges=step_blocked
         )
-
-        # Restore edge(s) immediately
-        for k, attrs in saved_edges.items():
-            G_directed.add_edge(u, v, key=k, **attrs)
 
         if reroute_result is None:
             # Complete disconnect: no alternative path exists!
@@ -271,7 +271,6 @@ def find_soft_bridges_on_route(
 
         if detour_ratio >= detour_threshold or is_disconnected:
             # Extract road name for clear dispatcher telemetry
-            first_attrs = next(iter(saved_edges.values()))
             road_name = first_attrs.get("name", "Unnamed Road")
             if isinstance(road_name, list):
                 road_name = road_name[0]
@@ -396,7 +395,7 @@ def calculate_resilience_score(
 
 
 def analyze_route_resilience(
-    G_directed: nx.MultiDiGraph,
+    G_directed: nx.MultiDiGraph | nx.DiGraph | nx.Graph,
     G_undirected: nx.Graph,
     route_nodes: List[Any],
     base_travel_time: float,
@@ -404,6 +403,7 @@ def analyze_route_resilience(
     target: Optional[Any] = None,
     global_bridges: Optional[Set[Tuple[Any, Any]]] = None,
     global_aps: Optional[Set[Any]] = None,
+    blocked_edges: Optional[Set[Tuple[Any, Any]]] = None,
 ) -> CriticalAnalysisResult:
     """Full pipeline for Prompt 3: Analyze strict/soft bridges, connectivity, and score.
 
@@ -452,7 +452,7 @@ def analyze_route_resilience(
 
     # 2. Soft Bridges with Detour Ratio >= 1.5
     soft_bridges, rho_max = find_soft_bridges_on_route(
-        G_directed, route_nodes, base_travel_time, detour_threshold=1.5
+        G_directed, route_nodes, base_travel_time, detour_threshold=1.5, blocked_edges=blocked_edges
     )
 
     # 3. Menger's Edge Connectivity (\lambda)

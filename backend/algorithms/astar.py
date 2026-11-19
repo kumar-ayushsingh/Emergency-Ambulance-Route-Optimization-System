@@ -175,6 +175,7 @@ def astar_shortest_path(
     target: Any,
     weight: str = "travel_time",
     max_speed_mps: Optional[float] = None,
+    blocked_edges: Optional[Set[Tuple[Any, Any]]] = None,
 ) -> Optional[SearchExecutionResult]:
     """Compute optimal shortest path from source to target using A* with Haversine heuristic.
 
@@ -263,6 +264,9 @@ def astar_shortest_path(
             if v in settled:
                 continue
 
+            if blocked_edges and ((u, v) in blocked_edges or (v, u) in blocked_edges):
+                continue
+
             edge_data_dict = G.get_edge_data(u, v)
             if edge_data_dict is None:
                 continue
@@ -327,6 +331,7 @@ def dijkstra_race_search(
     source: Any,
     target: Any,
     weight: str = "travel_time",
+    blocked_edges: Optional[Set[Tuple[Any, Any]]] = None,
 ) -> Optional[SearchExecutionResult]:
     """Execute Dijkstra's algorithm instrumented for fair algorithmic racing against A*.
 
@@ -391,6 +396,9 @@ def dijkstra_race_search(
 
         for v in G.neighbors(u):
             if v in settled:
+                continue
+
+            if blocked_edges and ((u, v) in blocked_edges or (v, u) in blocked_edges):
                 continue
 
             edge_data_dict = G.get_edge_data(u, v)

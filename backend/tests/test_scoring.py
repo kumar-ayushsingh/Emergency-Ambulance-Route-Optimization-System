@@ -166,9 +166,9 @@ def test_route_divergence_offpeak_vs_peak():
     attach_traffic_weights_to_graph(G)
 
     # Test between Richmond Town area and Victoria Hospital
-    import osmnx as ox
-    acc_node = ox.distance.nearest_nodes(G, X=77.6050, Y=12.9450)
-    h_vic = ox.distance.nearest_nodes(G, X=77.5750, Y=12.9634)
+    from backend.graph_builder import nearest_node
+    acc_node = nearest_node(G, X=77.6050, Y=12.9450)
+    h_vic = nearest_node(G, X=77.5750, Y=12.9634)
 
     divergence = compare_offpeak_vs_peak_route(G, acc_node, h_vic)
 

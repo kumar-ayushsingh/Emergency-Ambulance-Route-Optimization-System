@@ -21,8 +21,7 @@ from backend.algorithms.placement import (
     sample_demand_grid,
     swap_p_median,
 )
-from backend.graph_builder import load_graph, load_hospitals, load_stations
-import osmnx as ox
+from backend.graph_builder import load_graph, load_hospitals, load_stations, nearest_node
 
 
 @pytest.fixture(scope="module")
@@ -32,8 +31,8 @@ def graph_and_facilities():
     hospitals = load_hospitals()
     stations = load_stations()
 
-    hospital_nodes = [ox.distance.nearest_nodes(G, X=h["lng"], Y=h["lat"]) for h in hospitals]
-    station_nodes = [ox.distance.nearest_nodes(G, X=s["lng"], Y=s["lat"]) for s in stations]
+    hospital_nodes = [nearest_node(G, X=h["lng"], Y=h["lat"]) for h in hospitals]
+    station_nodes = [nearest_node(G, X=s["lng"], Y=s["lat"]) for s in stations]
 
     return {
         "G": G,

@@ -1,0 +1,7 @@
+# Build-time and Offline Preprocessing Dependencies
+# Used exclusively by scripts/build_graph.py to download and preprocess OSM networks
+-r requirements.txt
+osmnx>=2.0.0
+shapely>=2.0.0
+geopandas>=1.0.0
+pandas>=2.2.0

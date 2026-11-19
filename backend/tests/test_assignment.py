@@ -141,11 +141,11 @@ def test_bengaluru_multi_accident_dispatch_pipeline():
     G = load_graph()
     stations = load_stations()
 
-    import osmnx as ox
+    from backend.graph_builder import nearest_node
 
     station_node_map = {}
     for s in stations:
-        station_node_map[s["id"]] = int(ox.distance.nearest_nodes(G, X=s["lng"], Y=s["lat"]))
+        station_node_map[s["id"]] = int(nearest_node(G, X=s["lng"], Y=s["lat"]))
 
     fleet = build_ambulance_fleet(stations, station_node_map)
     assert len(fleet) == 14
@@ -157,21 +157,21 @@ def test_bengaluru_multi_accident_dispatch_pipeline():
             index=1,
             lat=12.9750,
             lng=77.5850,
-            snapped_node_id=int(ox.distance.nearest_nodes(G, X=77.5850, Y=12.9750)),
+            snapped_node_id=int(nearest_node(G, X=77.5850, Y=12.9750)),
         ),
         AccidentSite(
             id="acc-2",
             index=2,
             lat=12.9400,
             lng=77.6100,
-            snapped_node_id=int(ox.distance.nearest_nodes(G, X=77.6100, Y=12.9400)),
+            snapped_node_id=int(nearest_node(G, X=77.6100, Y=12.9400)),
         ),
         AccidentSite(
             id="acc-3",
             index=3,
             lat=12.9850,
             lng=77.6300,
-            snapped_node_id=int(ox.distance.nearest_nodes(G, X=77.6300, Y=12.9850)),
+            snapped_node_id=int(nearest_node(G, X=77.6300, Y=12.9850)),
         ),
     ]
 

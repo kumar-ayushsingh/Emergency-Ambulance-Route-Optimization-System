@@ -12,7 +12,6 @@ import json
 from pathlib import Path
 
 import networkx as nx
-import osmnx as ox
 import pytest
 
 from backend.graph_builder import (
@@ -23,6 +22,7 @@ from backend.graph_builder import (
     load_graph,
     load_hospitals,
     load_stations,
+    nearest_node,
     parse_speed_kph,
     verify_handshake_lemma,
 )
@@ -42,9 +42,9 @@ def undirected_graph(graph: nx.MultiDiGraph) -> nx.Graph:
     return get_undirected_simple_graph(graph)
 
 
-def test_graph_loaded_properties(graph: nx.MultiDiGraph):
+def test_graph_loaded_properties(graph: nx.DiGraph):
     """Verify directed graph contains nodes and edges within expected Bengaluru corridor bounds."""
-    assert isinstance(graph, nx.MultiDiGraph)
+    assert isinstance(graph, (nx.MultiDiGraph, nx.DiGraph))
     assert graph.number_of_nodes() > 5000, "Graph should contain at least 5,000 junctions"
     assert graph.number_of_edges() > 10000, "Graph should contain at least 10,000 road segments"
 
@@ -58,11 +58,14 @@ def test_strongly_connected_component(graph: nx.MultiDiGraph):
     assert nx.is_strongly_connected(graph), "Directed graph must be a single strongly connected component"
 
 
-def test_edge_travel_time_weights(graph: nx.MultiDiGraph):
+def test_edge_travel_time_weights(graph: nx.DiGraph):
     """Rule 3: Verify that all edge weights are strictly positive travel time in seconds."""
-    sample_edges = list(graph.edges(keys=True, data=True))[:1000]
+    if graph.is_multigraph():
+        sample_edges = [(u, v, data) for u, v, k, data in list(graph.edges(keys=True, data=True))[:1000]]
+    else:
+        sample_edges = [(u, v, data) for u, v, data in list(graph.edges(data=True))[:1000]]
 
-    for u, v, k, data in sample_edges:
+    for u, v, data in sample_edges:
         assert "travel_time" in data, f"Edge ({u}, {v}) missing 'travel_time' attribute"
         assert isinstance(data["travel_time"], (int, float)), "travel_time must be a numerical float"
         assert data["travel_time"] > 0, "travel_time must be strictly positive"
@@ -121,11 +124,11 @@ def test_hospitals_metadata_and_snapping(graph: nx.MultiDiGraph):
         assert h["trauma_level"] in valid_trauma, f"Invalid trauma level: {h['trauma_level']}"
 
         # Snap to nearest graph vertex
-        nearest_node = ox.distance.nearest_nodes(graph, X=h["lng"], Y=h["lat"])
-        assert nearest_node in graph, f"Hospital {h['name']} snapped node {nearest_node} not in graph"
+        nearest = nearest_node(graph, X=h["lng"], Y=h["lat"])
+        assert nearest in graph, f"Hospital {h['name']} snapped node {nearest} not in graph"
 
 
-def test_stations_metadata_and_snapping(graph: nx.MultiDiGraph):
+def test_stations_metadata_and_snapping(graph: nx.DiGraph):
     """Verify stations.json schema and verify all ambulance bases snap to valid graph vertices."""
     assert STATIONS_FILE.exists(), f"{STATIONS_FILE} must exist"
     stations = load_stations()
@@ -140,8 +143,8 @@ def test_stations_metadata_and_snapping(graph: nx.MultiDiGraph):
         assert "ambulances_available" in s and s["ambulances_available"] > 0
 
         # Snap to nearest graph vertex
-        nearest_node = ox.distance.nearest_nodes(graph, X=s["lng"], Y=s["lat"])
-        assert nearest_node in graph, f"Station {s['name']} snapped node {nearest_node} not in graph"
+        nearest = nearest_node(graph, X=s["lng"], Y=s["lat"])
+        assert nearest in graph, f"Station {s['name']} snapped node {nearest} not in graph"
 
 
 def test_parse_speed_kph():
